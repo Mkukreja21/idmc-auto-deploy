@@ -1,36 +1,68 @@
-# This is a basic workflow to help you get started with Actions
+name: Deploy DEV to QA in IDMC
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches: [main]
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  deploy:
+    name: Export from DEV and Import to QA
     runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - name: Install jq (required for JSON parsing)
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Get DEV Access Token
+        id: get_dev_token
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          DEV_RESPONSE=$(curl -s --request POST \
+            --url "${{ secrets.IDMC_BASE_URL }}/oauth2/v3/token" \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "client_id=${{ secrets.IDMC_DEV_CLIENT_ID }}" \
+            --data-urlencode "client_secret=${{ secrets.IDMC_DEV_CLIENT_SECRET }}" \
+            --data-urlencode 'grant_type=client_credentials')
+
+          echo "DEV_TOKEN=$(echo $DEV_RESPONSE | jq -r .access_token)" >> $GITHUB_ENV
+
+      - name: Export Mapping from DEV
+        id: export
+        run: |
+          EXPORT_RESPONSE=$(curl -s --request POST \
+            --url "${{ secrets.IDMC_BASE_URL }}/public/core/v3/export" \
+            --header "Authorization: Bearer $DEV_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{
+              "objects": [
+                { "type": "Mapping", "name": "'"${{ secrets.MAPPING_NAME }}"'" }
+              ],
+              "includeDependencies": true
+            }')
+
+          echo "FILE_CONTENT=$(echo $EXPORT_RESPONSE | jq -r '.fileContent')" >> $GITHUB_ENV
+
+      - name: Get QA Access Token
+        id: get_qa_token
+        run: |
+          QA_RESPONSE=$(curl -s --request POST \
+            --url "${{ secrets.IDMC_BASE_URL }}/oauth2/v3/token" \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "client_id=${{ secrets.IDMC_QA_CLIENT_ID }}" \
+            --data-urlencode "client_secret=${{ secrets.IDMC_QA_CLIENT_SECRET }}" \
+            --data-urlencode 'grant_type=client_credentials')
+
+          echo "QA_TOKEN=$(echo $QA_RESPONSE | jq -r .access_token)" >> $GITHUB_ENV
+
+      - name: Import to QA
+        run: |
+          curl -s --request POST \
+            --url "${{ secrets.IDMC_BASE_URL }}/public/core/v3/import" \
+            --header "Authorization: Bearer $QA_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{
+              "fileContent": "'"$FILE_CONTENT"'",
+              "importOptions": { "updateMode": "overwrite" }
+            }'
